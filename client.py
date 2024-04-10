@@ -6,29 +6,34 @@ import time
 from collections import defaultdict
 
 class Client:
-    def __init__(self, name, discovery_server=('localhost', 65432)):
+    def __init__(self, discovery_server=('localhost', 12345)):
         self.blocked_users = set()
-        self.name = name
         self.discovery_server = discovery_server
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.is_active = False
         self.messages_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.messages_socket.bind(('localhost', 0))
         self.listen_port = self.messages_socket.getsockname()[1]
-        self.is_active = True
+        self.username = None
         self.offline_messages = defaultdict(list)
-        self.is_registered = False
+        self.is_active = True
+
+    def get_listening_port(self):
+        return self.listen_port
+
     def listen_for_messages(self):
         self.messages_socket.listen()
-        print(f"{self.name} is listening for messages on {self.listen_port}.")
+        print(f"{self.username} is listening for messages on {self.listen_port}.")
 
         while self.is_active:
             try:
                 conn, addr = self.messages_socket.accept()
-                threading.Thread(target=self.handle_incoming_connection, args=(conn,)).start()
+                client_ip, client_port = addr  # 获取客户端的IP和端口信息
+                threading.Thread(target=self.handle_incoming_connection, args=(conn, client_ip, client_port)).start()
             except Exception as e:
                 print(f"Error accepting connections: {e}")
 
-    def handle_incoming_connection(self, conn):
+    def handle_incoming_connection(self, conn, client_ip, client_port):
         with conn:
             while self.is_active:
                 data = conn.recv(1024)
@@ -39,13 +44,13 @@ class Client:
                 if sender in self.blocked_users:
                     print(f"\nMessage from {sender} blocked.\n")
                 else:
-                    print(f"\n{self.name} received message: {message}\n")
+                    print(f"\n{self.username} received message: {message}\n")
                 print(
-                    f"{self.name}, enter your command (REGISTER, SEND <PeerName> <Message>, BLOCK <UserName>, UNBLOCK <UserName>, LIST, EXIT): ",
+                    f"{self.username}, enter your command (REGISTER, SEND <PeerName> <Message>, BLOCK <UserName>, UNBLOCK <UserName>, LIST, EXIT): ",
                     end='')
 
     def save_message_to_file(self, message):
-        with open(f"{self.name}_messages.txt", "a") as file:
+        with open(f"{self.username}_messages.txt", "a") as file:
             file.write(message + "\n")
 
     def send_message(self, peer_name, message):
@@ -100,10 +105,29 @@ class Client:
 
     def list_online_users(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            # 连接到服务器
             sock.connect(self.discovery_server)
+            # 请求在线用户列表
             sock.sendall("LIST_USERS".encode('utf-8'))
             response = sock.recv(1024).decode('utf-8')
-        print("Online users:", response)
+            users = response.split(", ")  # 假设用户之间用逗号分隔
+
+        print("Online users:")
+        for user in users:
+            # 对每个用户，请求其IP地址
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock_ip:
+                sock_ip.connect(self.discovery_server)
+                sock_ip.sendall(f"GET_IP {user}".encode('utf-8'))
+                ip = sock_ip.recv(1024).decode('utf-8')
+
+            # 对每个用户，请求其端口号
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock_port:
+                sock_port.connect(self.discovery_server)
+                sock_port.sendall(f"GET_PORT {user}".encode('utf-8'))
+                port = sock_port.recv(1024).decode('utf-8')
+
+            print(f"{user}: IP: {ip}, Port: {port}")
+
     def get_peer_port(self, peer_name):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.connect(self.discovery_server)
@@ -118,10 +142,10 @@ class Client:
     def register_with_discovery_server(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.connect(self.discovery_server)
-            register_command = f"REGISTER {self.name} {self.listen_port}"
+            register_command = f"REGISTER {self.username} {self.listen_port}"
             sock.sendall(register_command.encode('utf-8'))
             response = sock.recv(1024).decode('utf-8')
-            print(f"{self.name}: {response}")
+            print(f"{self.username}: {response}")
             if "Registered" in response:
                 self.is_registered = True
             else:
@@ -130,7 +154,7 @@ class Client:
     def command_line_interface(self):
         self.is_active = True  # 控制命令行界面循环
         while self.is_active:
-            command_input = input(f"{self.name}, enter your command (REGISTER, SEND <PeerName> <Message>, LIST, EXIT): ").strip()
+            command_input = input(f"{self.username}, enter your command (REGISTER, SEND <PeerName> <Message>, LIST, EXIT): ").strip()
             commands = command_input.split(maxsplit=2)
             if commands[0] == "BLOCK":
                 if len(commands) < 2:
@@ -158,21 +182,67 @@ class Client:
                 self.is_active = False
             else:
                 print("Unknown command or incorrect format.")
+    def send_to_server(self, message):
+        self.socket.connect(self.discovery_server)
+        self.socket.sendall(message.encode('utf-8'))
+        response = self.socket.recv(1024).decode('utf-8')
+        print(f"Server response: {response}")
+        self.socket.close()
+        return response
+
+    def register_new_user(self):
+        username = input("Enter your username: ")
+        password = input("Enter your password: ")
+        # Removed the part where the client's port is retrieved and sent to the server.
+        listening_port = self.get_listening_port()
+        message = f"REGISTER {username} {password} {listening_port}"
+        response = self.send_to_server(message)
+        if "Registered" in response:
+            self.username = username
+            self.is_active = True
+
+    def login_user(self):
+        username = input("Enter your username: ")
+        password = input("Enter your password: ")
+        listening_port = self.get_listening_port()
+        message = f"LOGIN {username} {password} {listening_port}"
+        response = self.send_to_server(message)
+        if "successful" in response:
+            self.username = username
+            self.is_active = True
+        else:
+            print("Login failed.")
+
+    def user_choice(self):
+        while True:
+            choice = input("Do you want to (1) Register or (2) Login? Enter 1 or 2: ")
+            if choice == '1':
+                self.register_new_user()
+                break
+            elif choice == '2':
+                self.login_user()
+                break
+            else:
+                print("Invalid choice. Please enter 1 or 2.")
 
     def start(self):
-        threading.Thread(target=self.listen_for_messages, daemon=True).start()
-        self.register_with_discovery_server()
-        self.command_line_interface()
+        self.user_choice()
+        if self.is_active:
+            print(f"Welcome {self.username}. You are now logged in.")
+            # 创建一个新的线程来运行 listen_for_messages 方法
+            threading.Thread(target=self.listen_for_messages, daemon=True).start()
+            self.command_line_interface()  # 添加命令行界面循环
+        print("Client stopped")
 
     def stop(self):
         self.is_active = False
         self.messages_socket.close()
         self.socket.close()
 
-while True:
-    client_name = input("Enter client name or type 'quit' to exit: ")
-    if client_name.lower() == 'quit':
-        break
+if __name__ == "__main__":
+    client = Client()
+    client.start()
+
     client = Client(client_name)
     client.start()
     client.stop()
